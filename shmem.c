@@ -481,8 +481,8 @@ int shmdt(void const* shmaddr)
 	pthread_mutex_unlock(&mutex);
 
 	DBG("%s: invalid address %p", __PRETTY_FUNCTION__, shmaddr);
-	errno = EINVAL;
-	return -1;
+	/* Could be a remove segment, do not report an error for that. */
+	return 0;
 }
 
 /* Shared memory control operation. */
@@ -491,14 +491,14 @@ int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 	ashv_check_pid();
 
 	if (cmd == IPC_RMID) {
-		DBG("%s: deleting shmid %x", __PRETTY_FUNCTION__, shmid);
+		DBG("%s: IPC_RMID for shmid=%x", __PRETTY_FUNCTION__, shmid);
 		pthread_mutex_lock(&mutex);
 		int idx = ashv_find_local_index(shmid);
 		if (idx == -1) {
-			DBG("%s: ERROR: shmid %x does not exist", __PRETTY_FUNCTION__, shmid);
+			DBG("%s: shmid=%x does not exist locally", __PRETTY_FUNCTION__, shmid);
+			/* We do not rm non-local regions, but do not report an error for that. */
 			pthread_mutex_unlock(&mutex);
-			errno = EINVAL;
-			return -1;
+			return 0;
 		}
 
 		if (shmem[idx].addr) {
