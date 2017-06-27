@@ -7,6 +7,10 @@
 
 __BEGIN_DECLS
 
+#ifndef shmid_ds
+# define shmid_ds shmid64_ds
+#endif
+
 /* Shared memory control operations. */
 extern int shmctl(int shmid, int cmd, struct shmid_ds* buf);
 

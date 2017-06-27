@@ -539,8 +539,6 @@ int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 		buf->shm_perm.mode = 0666;
 		buf->shm_perm.seq = 1;
 
-		DBG ("%s: shmid %x size %d", __PRETTY_FUNCTION__, shmid, buf->shm_segsz);
-
 		pthread_mutex_unlock (&mutex);
 		return 0;
 	}
