@@ -1,13 +1,21 @@
-CFLAGS += -fpic -shared -std=c11 -Wall -Wextra -Wl,--version-script=exports.txt
+CFLAGS += -fpic -shared -std=c11 -Wall -Wextra
+LDFLAGS += -Wl,--version-script=exports.txt
 
-libandroid-shmem.so: shmem.c shm.h
-	$(CC) $(CFLAGS) $(LDFLAGS) shmem.c -llog -o $@
+libandroid-shmem.a: shmem.o
+	$(AR) rcu $@ shmem.o
 
-install: libandroid-shmem.so shm.h
+libandroid-shmem.so: shmem.o
+	$(CC) $(LDFLAGS) -shared shmem.o -o $@ -llog
+
+shmem.o: shmem.c shm.h
+	$(CC) $(CFLAGS) -c shmem.c -o $@
+
+install: libandroid-shmem.a libandroid-shmem.so shm.h
+	install -D libandroid-shmem.a $(PREFIX)/lib/libandroid-shmem.a
 	install -D libandroid-shmem.so $(PREFIX)/lib/libandroid-shmem.so
 	install -D shm.h $(PREFIX)/include/sys/shm.h
 
 clean:
-	rm -f libandroid-shmem.so
+	rm -f libandroid-shmem.a libandroid-shmem.so
 
 .PHONY: install
