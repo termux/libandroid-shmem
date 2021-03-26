@@ -347,7 +347,12 @@ int shmget(key_t key, size_t size, int flags)
 				path_buffer[path_length] = '\0';
 				int shmid = atoi(path_buffer);
 				if (shmid != 0) {
-					int idx = ashv_read_remote_segment(shmid);
+					int idx = ashv_find_local_index(shmid);
+
+					if (idx == -1) {
+						idx = ashv_read_remote_segment(shmid);
+					}
+
 					if (idx != -1) {
 						pthread_mutex_unlock(&mutex);
 						return shmem[idx].id;
