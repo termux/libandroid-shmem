@@ -552,3 +552,13 @@ int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 	errno = EINVAL;
 	return -1;
 }
+
+/* Make alias for use with e.g. dlopen() */
+#undef shmctl
+int shmctl(int shmid, int cmd, struct shmid_ds *buf) __attribute__((alias("libandroid_shmctl")));
+#undef shmget
+int shmget(key_t key, size_t size, int flags) __attribute__((alias("libandroid_shmget")));
+#undef shmat
+void* shmat(int shmid, void const* shmaddr, int shmflg) __attribute__((alias("libandroid_shmat")));
+#undef shmdt
+int shmdt(void const* shmaddr) __attribute__((alias("libandroid_shmdt")));

@@ -1,5 +1,9 @@
 {
 	global:
+		libandroid_shmctl;
+		libandroid_shmget;
+		libandroid_shmat;
+		libandroid_shmdt;
 		shmctl;
 		shmget;
 		shmat;
