@@ -13,6 +13,8 @@
 # include "shm.h"
 #endif
 
+#define TEST_TEXT "Hello, Test!"
+
 void error_exit(char const* msg) {
 	perror(msg);
 	exit(1);

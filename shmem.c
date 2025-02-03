@@ -22,6 +22,13 @@
 #define ANDROID_SHMEM_SOCKNAME "/dev/shm/%08x"
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 
+// Action numbers
+#define ASHV_RM 0
+#define ASHV_GET 1
+#define ASHV_AT 2
+#define ASHV_DT 3
+#define ASHV_UPD 4
+
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
@@ -33,6 +40,8 @@ typedef struct {
 	size_t size;
 	bool markedForDeletion;
 	key_t key;
+	int countAttach;
+	pid_t *attachedPids;
 } shmem_t;
 
 static shmem_t* shmem = NULL;
@@ -43,7 +52,7 @@ static size_t shmem_amount = 0;
 static int ashv_local_socket_id = 0;
 // To handle forks we store which pid the ashv_local_socket_id was
 // created for.
-static int ashv_pid_setup = 0;
+static pid_t ashv_pid_setup = 0;
 static pthread_t ashv_listening_thread_id = 0;
 
 static int ancil_send_fd(int sock, int fd)
@@ -177,11 +186,81 @@ static int ashv_socket_id_from_shmid(int shmid)
 
 static int ashv_find_local_index(int shmid)
 {
-	for (size_t i = 0; i < shmem_amount; i++)
-		if (shmem[i].id == shmid)
+	for (size_t i = 0; i < shmem_amount; i++) {
+		if (shmem[i].id == shmid) {
 			return i;
+		}
+	}
 	return -1;
 }
+
+static int ashv_write_pids(int sendsock, int idx)
+{
+	if (shmem[idx].countAttach > 0) {
+		pid_t pids[shmem[idx].countAttach];
+		for (int i=0; i<shmem[idx].countAttach; i++) {
+			pids[i] = shmem[idx].attachedPids[i];
+		}
+		if (write(sendsock, &pids, sizeof(pid_t)*shmem[idx].countAttach) != sizeof(pid_t)*shmem[idx].countAttach) {
+			DBG("%s: ERROR: write pids failed: %s", __PRETTY_FUNCTION__, strerror(errno));
+			return -1;
+		}
+	}
+	return 0;
+}
+
+void android_shmem_attach_pid(int idx, pid_t pid) {
+	int idp = shmem[idx].countAttach;
+	shmem[idx].countAttach++;
+	shmem[idx].attachedPids = realloc(shmem[idx].attachedPids, shmem[idx].countAttach*sizeof(pid_t));
+	shmem[idx].attachedPids[idp] = pid;
+}
+
+void android_shmem_detach_pid(int idx, pid_t pid) {
+	for (int i=0; i<shmem[idx].countAttach; i++) {
+		if (shmem[idx].attachedPids[i] == pid) {
+			shmem[idx].countAttach--;
+			memmove(&shmem[idx].attachedPids[i], &shmem[idx].attachedPids[i+1], (shmem[idx].countAttach-i)*sizeof(pid_t));
+			break;
+		}
+	}
+}
+
+void android_shmem_check_pids(int idx) {
+	for (int i=0; i<shmem[idx].countAttach; i++) {
+		if (kill(shmem[idx].attachedPids[i], 0) != 0) {
+			DBG ("%s: process %d not found, removed from list", __PRETTY_FUNCTION__, shmem[idx].attachedPids[i]);
+			shmem[idx].countAttach--;
+			memmove(&shmem[idx].attachedPids[i], &shmem[idx].attachedPids[i+1], (shmem[idx].countAttach-i)*sizeof(pid_t));
+			i--;
+		}
+	}
+}
+
+void android_shmem_delete(int idx) {
+	if (shmem[idx].descriptor) close(shmem[idx].descriptor);
+	shmem_amount--;
+	memmove(&shmem[idx], &shmem[idx+1], (shmem_amount - idx) * sizeof(shmem_t));
+}
+
+void ashv_delete_segment(int idx) {
+	shmem[idx].markedForDeletion = true;
+	if (shmem[idx].countAttach == 0) {
+		android_shmem_delete(idx);
+	}
+}
+
+#define SOCKET_ASHV_WRITE(type, var) \
+	if (write(sendsock, &shmem[idx].var, sizeof(type)) != sizeof(type)) { \
+		DBG("%s: ERROR: write %s failed: %s", __PRETTY_FUNCTION__, #var, strerror(errno)); \
+		break; \
+	}
+
+#define SOCKET_ASHV_READ(type, var) \
+	if (read(sendsock, &var, sizeof(type)) != sizeof(type)) { \
+		DBG("%s: ERROR: read %s failed: %s", __PRETTY_FUNCTION__, #var, strerror(errno)); \
+		break; \
+	}
 
 static void* ashv_thread_function(void* arg)
 {
@@ -194,18 +273,54 @@ static void* ashv_thread_function(void* arg)
 	while ((sendsock = accept(sock, (struct sockaddr *)&addr, &len)) != -1) {
 		int shmid;
 		if (recv(sendsock, &shmid, sizeof(shmid), 0) != sizeof(shmid)) {
-			DBG("%s: ERROR: recv() returned not %zu bytes", __PRETTY_FUNCTION__, sizeof(shmid));
+			DBG("%s: ERROR: recv() returned not %zu shmid bytes", __PRETTY_FUNCTION__, sizeof(shmid));
+			close(sendsock);
+			continue;
+		}
+		int action;
+		if (recv(sendsock, &action, sizeof(action), 0) != sizeof(action)) {
+			DBG("%s: ERROR: recv() returned not %zu action bytes", __PRETTY_FUNCTION__, sizeof(action));
 			close(sendsock);
 			continue;
 		}
 		pthread_mutex_lock(&mutex);
 		int idx = ashv_find_local_index(shmid);
 		if (idx != -1) {
-			if (write(sendsock, &shmem[idx].key, sizeof(key_t)) != sizeof(key_t)) {
-				DBG("%s: ERROR: write failed: %s", __PRETTY_FUNCTION__, strerror(errno));
-			}
-			if (ancil_send_fd(sendsock, shmem[idx].descriptor) != 0) {
-				DBG("%s: ERROR: ancil_send_fd() failed: %s", __PRETTY_FUNCTION__, strerror(errno));
+			pid_t pid;
+			switch (action) {
+			case ASHV_RM:
+				DBG("%s: action ASHV_RM(%d) for %d", __PRETTY_FUNCTION__, action, shmid);
+				ashv_delete_segment(idx);
+				break;
+			case ASHV_GET:
+				DBG("%s: action ASHV_GET(%d) for %d", __PRETTY_FUNCTION__, action, shmid);
+				SOCKET_ASHV_WRITE(key_t, key)
+				SOCKET_ASHV_WRITE(bool, markedForDeletion)
+				SOCKET_ASHV_WRITE(int, countAttach)
+				if (ancil_send_fd(sendsock, shmem[idx].descriptor) != 0) {
+					DBG("%s: ERROR: ancil_send_fd() failed: %s", __PRETTY_FUNCTION__, strerror(errno));
+				}
+				break;
+			case ASHV_AT:
+				DBG("%s: action ASHV_AT(%d) for %d", __PRETTY_FUNCTION__, action, shmid);
+				SOCKET_ASHV_READ(pid_t, pid)
+				android_shmem_attach_pid(idx, pid);
+				break;
+			case ASHV_DT:
+				DBG("%s: action ASHV_DT(%d) for %d", __PRETTY_FUNCTION__, action, shmid);
+				SOCKET_ASHV_READ(pid_t, pid)
+				android_shmem_detach_pid(idx, pid);
+				break;
+			case ASHV_UPD:
+				DBG("%s: action ASHV_UPD(%d) for %d", __PRETTY_FUNCTION__, action, shmid);
+				SOCKET_ASHV_WRITE(bool, markedForDeletion)
+				android_shmem_check_pids(idx);
+				SOCKET_ASHV_WRITE(int, countAttach)
+				ashv_write_pids(sendsock, idx);
+				break;
+			default:
+				DBG("%s: ERROR: unknown action %d", __PRETTY_FUNCTION__, action);
+				break;
 			}
 		} else {
 			DBG("%s: ERROR: cannot find shmid 0x%x", __PRETTY_FUNCTION__, shmid);
@@ -218,41 +333,133 @@ static void* ashv_thread_function(void* arg)
 	return NULL;
 }
 
-static void android_shmem_delete(int idx)
+static int ashv_read_pids(int recvsock, int idx)
 {
-	if (shmem[idx].descriptor) close(shmem[idx].descriptor);
-	shmem_amount--;
-	memmove(&shmem[idx], &shmem[idx+1], (shmem_amount - idx) * sizeof(shmem_t));
+	if (shmem[idx].countAttach > 0) {
+		pid_t pids[shmem[idx].countAttach];
+		if (read(recvsock, &pids, sizeof(pid_t)*shmem[idx].countAttach) != sizeof(pid_t)*shmem[idx].countAttach) {
+			DBG("%s: ERROR: read pids failed: %s", __PRETTY_FUNCTION__, strerror(errno));
+			return -1;
+		}
+		shmem[idx].attachedPids = NULL;
+		shmem[idx].attachedPids = realloc(shmem[idx].attachedPids, sizeof(pid_t)*shmem[idx].countAttach);
+		for (int i=0; i<shmem[idx].countAttach; i++) {
+			shmem[idx].attachedPids[i] = pids[i];
+		}
+	} else {
+		shmem[idx].attachedPids = NULL;
+	}
+	return 0;
 }
 
-static int ashv_read_remote_segment(int shmid)
+static int ashv_connect_socket(struct sockaddr_un *addr, int shmid)
 {
-	struct sockaddr_un addr;
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	sprintf(&addr.sun_path[1], ANDROID_SHMEM_SOCKNAME, ashv_socket_id_from_shmid(shmid));
-	int addrlen = sizeof(addr.sun_family) + strlen(&addr.sun_path[1]) + 1;
+	memset(addr, 0, sizeof(*addr));
+	addr->sun_family = AF_UNIX;
+	sprintf(&addr->sun_path[1], ANDROID_SHMEM_SOCKNAME, ashv_socket_id_from_shmid(shmid));
+	int addrlen = sizeof(addr->sun_family) + strlen(&addr->sun_path[1]) + 1;
 
 	int recvsock = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (recvsock == -1) {
 		DBG ("%s: cannot create UNIX socket: %s", __PRETTY_FUNCTION__, strerror(errno));
 		return -1;
 	}
-	if (connect(recvsock, (struct sockaddr*) &addr, addrlen) != 0) {
-		DBG("%s: Cannot connect to UNIX socket %s: %s, len %d", __PRETTY_FUNCTION__, addr.sun_path + 1, strerror(errno), addrlen);
+	if (connect(recvsock, (struct sockaddr*)addr, addrlen) != 0) {
+		DBG("%s: Cannot connect to UNIX socket %s: %s, len %d", __PRETTY_FUNCTION__, addr->sun_path + 1, strerror(errno), addrlen);
 		close(recvsock);
 		return -1;
 	}
 
+	return recvsock;
+}
+
+static int ashv_send_shmid_action(int recvsock, struct sockaddr_un *addr, int shmid, int action)
+{
 	if (send(recvsock, &shmid, sizeof(shmid), 0) != sizeof(shmid)) {
-		DBG ("%s: send() failed on socket %s: %s", __PRETTY_FUNCTION__, addr.sun_path + 1, strerror(errno));
+		DBG("%s: send shmid failed on socket %s: %s", __PRETTY_FUNCTION__, addr->sun_path + 1, strerror(errno));
+		return -1;
+	}
+	if (send(recvsock, &action, sizeof(action), 0) != sizeof(action)) {
+		DBG("%s: send action failed on socket %s: %s", __PRETTY_FUNCTION__, addr->sun_path + 1, strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+#define FUNC_ASHV_READ(type, var) \
+	type var; \
+	if (read(recvsock, &var, sizeof(type)) != sizeof(type)) { \
+		DBG("%s: ERROR: read %s failed", __PRETTY_FUNCTION__, #var); \
+		close(recvsock); \
+		return -1; \
+	}
+
+static int ashv_delete_remote_segment(int shmid)
+{
+	struct sockaddr_un addr;
+	int recvsock = ashv_connect_socket(&addr, shmid);
+	if (recvsock == -1) {
+		return -1;
+	}
+
+	int res = ashv_send_shmid_action(recvsock, &addr, shmid, ASHV_RM);
+
+	close(recvsock);
+	return res;
+}
+
+static int ashv_send_pid_remote_segment(int shmid, int action)
+{
+	struct sockaddr_un addr;
+	int recvsock = ashv_connect_socket(&addr, shmid);
+	if (recvsock == -1) {
+		return -1;
+	}
+
+	if (ashv_send_shmid_action(recvsock, &addr, shmid, action) == -1) {
 		close(recvsock);
 		return -1;
 	}
 
-	key_t key;
-	if (read(recvsock, &key, sizeof(key_t)) != sizeof(key_t)) {
-		DBG("%s: ERROR: failed read", __PRETTY_FUNCTION__);
+	if (write(recvsock, &ashv_pid_setup, sizeof(pid_t)) != sizeof(pid_t)) {
+		DBG("%s: ERROR: write pid failed", __PRETTY_FUNCTION__);
+		close(recvsock);
+		return -1;
+        }
+
+	close(recvsock);
+	return 0;
+}
+
+static int ashv_attach_remote_segment(int shmid)
+{
+	return ashv_send_pid_remote_segment(shmid, ASHV_AT);
+}
+
+static int ashv_detach_remote_segment(int shmid)
+{
+	return ashv_send_pid_remote_segment(shmid, ASHV_DT);
+}
+
+static int ashv_read_remote_segment(int shmid)
+{
+	struct sockaddr_un addr;
+	int recvsock = ashv_connect_socket(&addr, shmid);
+	if (recvsock == -1) {
+		return -1;
+	}
+
+	if (ashv_send_shmid_action(recvsock, &addr, shmid, ASHV_GET) == -1) {
+		close(recvsock);
+		return -1;
+	}
+
+	FUNC_ASHV_READ(key_t, key)
+	FUNC_ASHV_READ(bool, markedForDeletion)
+	FUNC_ASHV_READ(int, countAttach)
+
+	if (markedForDeletion && countAttach == 0) {
+		DBG("%s: shmid %d is marked for deletion so it is not passed", __PRETTY_FUNCTION__, shmid);
 		close(recvsock);
 		return -1;
 	}
@@ -278,9 +485,52 @@ static int ashv_read_remote_segment(int shmid)
 	shmem[idx].descriptor = descriptor;
 	shmem[idx].size = size;
 	shmem[idx].addr = NULL;
-	shmem[idx].markedForDeletion = false;
+	shmem[idx].markedForDeletion = markedForDeletion;
 	shmem[idx].key = key;
+	shmem[idx].countAttach = countAttach;
 	return idx;
+}
+
+static int ashv_get_update_remote_segment(int idx)
+{
+	int shmid = shmem[idx].id;
+	struct sockaddr_un addr;
+	int recvsock = ashv_connect_socket(&addr, shmid);
+	if (recvsock == -1) {
+		goto removal;
+	}
+
+	if (ashv_send_shmid_action(recvsock, &addr, shmid, ASHV_UPD) == -1) {
+		close(recvsock);
+		goto removal;
+	}
+
+	if (read(recvsock, &shmem[idx].markedForDeletion, sizeof(bool)) != sizeof(bool)) {
+		close(recvsock);
+		goto removal;
+	}
+
+	if (read(recvsock, &shmem[idx].countAttach, sizeof(int)) != sizeof(int)) {
+		close(recvsock);
+		goto removal;
+	}
+
+	if (ashv_read_pids(recvsock, idx) != 0) {
+		close(recvsock);
+		goto removal;
+	}
+
+	close(recvsock);
+	return 0;
+removal:
+	DBG("%s: socket returned an error, shm %d will have a delete mark", __PRETTY_FUNCTION__, shmid);
+	shmem[idx].countAttach = 0;
+	shmem[idx].markedForDeletion = true;
+	shmem[idx].attachedPids = NULL;
+	if (shmem[idx].addr != NULL) {
+		android_shmem_attach_pid(idx, ashv_pid_setup);
+	}
+	return -1;
 }
 
 /* Get shared memory area identifier. */
@@ -348,13 +598,31 @@ int shmget(key_t key, size_t size, int flags)
 				path_buffer[path_length] = '\0';
 				int shmid = atoi(path_buffer);
 				if (shmid != 0) {
+					int socket_id = ashv_socket_id_from_shmid(shmid);
 					int idx = ashv_find_local_index(shmid);
-
-					if (idx == -1) {
+					if (idx == -1 && socket_id != ashv_local_socket_id) {
 						idx = ashv_read_remote_segment(shmid);
 					}
 
 					if (idx != -1) {
+						if (socket_id != ashv_local_socket_id) {
+							ashv_get_update_remote_segment(idx);
+						} else {
+							android_shmem_check_pids(idx);
+						}
+						if (shmem[idx].markedForDeletion && shmem[idx].countAttach == 0) {
+							android_shmem_delete(idx);
+							idx = -1;
+						}
+					}
+
+					if (idx != -1) {
+						if (flags & IPC_CREAT && flags & IPC_EXCL) {
+							DBG("%s: shm with key %d should be created but it already exists (IPC_CREAT+IPC_EXCL)", __PRETTY_FUNCTION__, key);
+							errno = EEXIST;
+							pthread_mutex_unlock(&mutex);
+							return -1;
+						}
 						pthread_mutex_unlock(&mutex);
 						return shmem[idx].id;
 					}
@@ -372,6 +640,13 @@ int shmget(key_t key, size_t size, int flags)
 				sprintf(num_buffer, "%d", shmid);
 			}
 			if (symlink(num_buffer, symlink_path) == 0) break;
+		}
+
+		if (!(flags & IPC_CREAT)) {
+			DBG("%s: shm with key %d was not found and no command was given to create it (no IPC_CREAT)", __PRETTY_FUNCTION__, key);
+			errno = ENOENT;
+			pthread_mutex_unlock(&mutex);
+			return -1;
 		}
 	}
 
@@ -394,6 +669,8 @@ int shmget(key_t key, size_t size, int flags)
 	shmem[idx].id = shmid;
 	shmem[idx].markedForDeletion = false;
 	shmem[idx].key = key;
+	shmem[idx].countAttach = 0;
+	shmem[idx].attachedPids = NULL;
 
 	if (shmem[idx].descriptor < 0) {
 		DBG("%s: ashmem_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
@@ -428,37 +705,55 @@ int shmget(key_t key, size_t size, int flags)
 	return shmid;
 }
 
+#define INIT_SHMEM(ret_err) \
+	int socket_id = ashv_socket_id_from_shmid(shmid); \
+	int idx = ashv_find_local_index(shmid); \
+	if (idx == -1 && socket_id != ashv_local_socket_id) { \
+		idx = ashv_read_remote_segment(shmid); \
+	} \
+	if (idx == -1) { \
+		DBG ("%s: ERROR: shmid %x does not exist\n", __PRETTY_FUNCTION__, shmid); \
+		pthread_mutex_unlock(&mutex); \
+		errno = EINVAL; \
+		return ret_err; \
+	} \
+	if (socket_id != ashv_local_socket_id) { \
+		ashv_get_update_remote_segment(idx); \
+	} else { \
+		android_shmem_check_pids(idx); \
+	} \
+	if (shmem[idx].markedForDeletion && shmem[idx].countAttach == 0) { \
+		DBG ("%s: shmid %d marked for deletion, it will be deleted\n", __PRETTY_FUNCTION__, shmid); \
+		android_shmem_delete(idx); \
+		pthread_mutex_unlock(&mutex); \
+		errno = EINVAL; \
+		return ret_err; \
+	}
+
 /* Attach shared memory segment. */
 void* shmat(int shmid, void const* shmaddr, int shmflg)
 {
 	ashv_check_pid();
 
-	int socket_id = ashv_socket_id_from_shmid(shmid);
 	void *addr;
 
 	pthread_mutex_lock(&mutex);
 
-	int idx = ashv_find_local_index(shmid);
-	if (idx == -1 && socket_id != ashv_local_socket_id) {
-		idx = ashv_read_remote_segment(shmid);
-	}
-
-	if (idx == -1) {
-		DBG ("%s: shmid %x does not exist", __PRETTY_FUNCTION__, shmid);
-		pthread_mutex_unlock(&mutex);
-		errno = EINVAL;
-		return (void*) -1;
-	}
+	INIT_SHMEM((void*)-1)
 
 	if (shmem[idx].addr == NULL) {
+		if (socket_id != ashv_local_socket_id) {
+			ashv_attach_remote_segment(shmid);
+		}
+		android_shmem_attach_pid(idx, ashv_pid_setup);
 		shmem[idx].addr = mmap((void*) shmaddr, shmem[idx].size, PROT_READ | (shmflg == 0 ? PROT_WRITE : 0), MAP_SHARED, shmem[idx].descriptor, 0);
 		if (shmem[idx].addr == MAP_FAILED) {
-			DBG ("%s: mmap() failed for ID %x FD %d: %s", __PRETTY_FUNCTION__, idx, shmem[idx].descriptor, strerror(errno));
+			DBG ("%s: mmap() failed for ID %x FD %d: %s\n", __PRETTY_FUNCTION__, idx, shmem[idx].descriptor, strerror(errno));
 			shmem[idx].addr = NULL;
 		}
 	}
 	addr = shmem[idx].addr;
-	DBG ("%s: mapped addr %p for FD %d ID %d", __PRETTY_FUNCTION__, addr, shmem[idx].descriptor, idx);
+	DBG ("%s: mapped addr %p for FD %d ID %d\n", __PRETTY_FUNCTION__, addr, shmem[idx].descriptor, idx);
 	pthread_mutex_unlock (&mutex);
 
 	return addr ? addr : (void *)-1;
@@ -470,24 +765,36 @@ int shmdt(void const* shmaddr)
 	ashv_check_pid();
 
 	pthread_mutex_lock(&mutex);
-	for (size_t i = 0; i < shmem_amount; i++) {
+	for (size_t i = 0; i < shmem_amount; i++)
 		if (shmem[i].addr == shmaddr) {
 			if (munmap(shmem[i].addr, shmem[i].size) != 0) {
-				DBG("%s: munmap %p failed", __PRETTY_FUNCTION__, shmaddr);
+				DBG("%s: munmap %p failed\n", __PRETTY_FUNCTION__, shmaddr);
 			}
 			shmem[i].addr = NULL;
-			DBG("%s: unmapped addr %p for FD %d ID %zu shmid %x", __PRETTY_FUNCTION__, shmaddr, shmem[i].descriptor, i, shmem[i].id);
-			if (shmem[i].markedForDeletion || ashv_socket_id_from_shmid(shmem[i].id) != ashv_local_socket_id) {
-				DBG ("%s: deleting shmid %x", __PRETTY_FUNCTION__, shmem[i].id);
+			DBG("%s: unmapped addr %p for FD %d ID %zu shmid %x\n", __PRETTY_FUNCTION__, shmaddr, shmem[i].descriptor, i, shmem[i].id);
+
+			int socket_id = ashv_socket_id_from_shmid(shmem[i].id);
+			if (socket_id != ashv_local_socket_id) {
+				ashv_get_update_remote_segment(i);
+				ashv_detach_remote_segment(shmem[i].id);
+			} else {
+				android_shmem_check_pids(i);
+			}
+			android_shmem_detach_pid(i, ashv_pid_setup);
+
+			if (shmem[i].markedForDeletion && shmem[i].countAttach == 0) {
+				DBG ("%s: deleting shmid %x\n", __PRETTY_FUNCTION__, shmem[i].id);
 				android_shmem_delete(i);
+				if (socket_id != ashv_local_socket_id) {
+					ashv_delete_remote_segment(shmem[i].id);
+				}
 			}
 			pthread_mutex_unlock(&mutex);
 			return 0;
-		}
 	}
 	pthread_mutex_unlock(&mutex);
 
-	DBG("%s: invalid address %p", __PRETTY_FUNCTION__, shmaddr);
+	DBG("%s: invalid address %p\n", __PRETTY_FUNCTION__, shmaddr);
 	/* Could be a remove segment, do not report an error for that. */
 	return 0;
 }
@@ -497,46 +804,32 @@ int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 {
 	ashv_check_pid();
 
-	if (cmd == IPC_RMID) {
-		DBG("%s: IPC_RMID for shmid=%x", __PRETTY_FUNCTION__, shmid);
-		pthread_mutex_lock(&mutex);
-		int idx = ashv_find_local_index(shmid);
-		if (idx == -1) {
-			DBG("%s: shmid=%x does not exist locally", __PRETTY_FUNCTION__, shmid);
-			/* We do not rm non-local regions, but do not report an error for that. */
-			pthread_mutex_unlock(&mutex);
-			return 0;
+	pthread_mutex_lock(&mutex);
+
+	INIT_SHMEM(-1)
+
+	switch (cmd) {
+	case IPC_RMID:
+		DBG("%s: IPC_RMID for shmid=%x\n", __PRETTY_FUNCTION__, shmid);
+
+		ashv_delete_segment(idx);
+		if (socket_id != ashv_local_socket_id) {
+			ashv_delete_remote_segment(shmid);
 		}
 
-		if (shmem[idx].addr) {
-			// shmctl(2): The segment will actually be destroyed only
-			// after the last process detaches it (i.e., when the shm_nattch
-			// member of the associated structure shmid_ds is zero.
-			shmem[idx].markedForDeletion = true;
-		} else {
-			android_shmem_delete(idx);
-		}
-		pthread_mutex_unlock(&mutex);
-		return 0;
-	} else if (cmd == IPC_STAT) {
+		goto ok;
+	case SHM_STAT:
+	case SHM_STAT_ANY:
+	case IPC_STAT:
 		if (!buf) {
-			DBG ("%s: ERROR: buf == NULL for shmid %x", __PRETTY_FUNCTION__, shmid);
-			errno = EINVAL;
-			return -1;
+			DBG ("%s: ERROR: buf == NULL for shmid %x\n", __PRETTY_FUNCTION__, shmid);
+			goto error;
 		}
 
-		pthread_mutex_lock(&mutex);
-		int idx = ashv_find_local_index(shmid);
-		if (idx == -1) {
-			DBG ("%s: ERROR: shmid %x does not exist", __PRETTY_FUNCTION__, shmid);
-			pthread_mutex_unlock (&mutex);
-			errno = EINVAL;
-			return -1;
-		}
 		/* Report max permissive mode */
 		memset(buf, 0, sizeof(struct shmid_ds));
 		buf->shm_segsz = shmem[idx].size;
-		buf->shm_nattch = 1;
+		buf->shm_nattch = shmem[idx].countAttach;
 		buf->shm_perm.key = shmem[idx].key;
 		buf->shm_perm.uid = geteuid();
 		buf->shm_perm.gid = getegid();
@@ -545,11 +838,16 @@ int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 		buf->shm_perm.mode = 0666;
 		buf->shm_perm.seq = 1;
 
-		pthread_mutex_unlock (&mutex);
-		return 0;
+		goto ok;
+	default:
+		DBG("%s: cmd %d not implemented yet!\n", __PRETTY_FUNCTION__, cmd);
+		goto error;
 	}
-
-	DBG("%s: cmd %d not implemented yet!", __PRETTY_FUNCTION__, cmd);
+ok:
+	pthread_mutex_unlock (&mutex);
+	return 0;
+error:
+	pthread_mutex_unlock (&mutex);
 	errno = EINVAL;
 	return -1;
 }
