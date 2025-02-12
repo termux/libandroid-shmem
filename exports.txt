@@ -4,6 +4,8 @@
 		libandroid_shmget;
 		libandroid_shmat;
 		libandroid_shmdt;
+		libandroid_shmat_fd;
+		libandroid_shmdt_fd;
 		shmctl;
 		shmget;
 		shmat;

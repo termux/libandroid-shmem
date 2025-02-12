@@ -492,6 +492,60 @@ int shmdt(void const* shmaddr)
 	return 0;
 }
 
+/* Let PRoot attach shared memory segment to another process. */
+int libandroid_shmat_fd(int shmid, size_t* out_size)
+{
+	ashv_check_pid();
+
+	int socket_id = ashv_socket_id_from_shmid(shmid);
+	int fd;
+
+	pthread_mutex_lock(&mutex);
+
+	int idx = ashv_find_local_index(shmid);
+	if (idx == -1 && socket_id != ashv_local_socket_id) {
+		idx = ashv_read_remote_segment(shmid);
+	}
+
+	if (idx == -1) {
+		DBG ("%s: shmid %x does not exist", __PRETTY_FUNCTION__, shmid);
+		pthread_mutex_unlock(&mutex);
+		errno = EINVAL;
+		return -1;
+	}
+
+	fd = shmem[idx].descriptor;
+	*out_size = shmem[idx].size;
+	DBG ("%s: mapped for FD %d ID %d", __PRETTY_FUNCTION__, shmem[idx].descriptor, idx);
+	pthread_mutex_unlock (&mutex);
+
+	return fd;
+}
+
+/* Let PRoot detach shared memory segment after last process detached. */
+int libandroid_shmdt_fd(int fd)
+{
+	ashv_check_pid();
+
+	pthread_mutex_lock(&mutex);
+	for (size_t i = 0; i < shmem_amount; i++) {
+		if (shmem[i].descriptor == fd) {
+			DBG("%s: unmapped for FD %d ID %zu shmid %x", __PRETTY_FUNCTION__, shmem[i].descriptor, i, shmem[i].id);
+			if (shmem[i].markedForDeletion || ashv_socket_id_from_shmid(shmem[i].id) != ashv_local_socket_id) {
+				DBG ("%s: deleting shmid %x", __PRETTY_FUNCTION__, shmem[i].id);
+				android_shmem_delete(i);
+			}
+			pthread_mutex_unlock(&mutex);
+			return 0;
+		}
+	}
+	pthread_mutex_unlock(&mutex);
+
+	DBG("%s: invalid fd %d", __PRETTY_FUNCTION__, fd);
+	/* Could be a remove segment, do not report an error for that. */
+	return 0;
+}
+
 /* Shared memory control operation. */
 int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 {

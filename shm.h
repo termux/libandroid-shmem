@@ -31,6 +31,9 @@ extern void *shmat(int shmid, void const* shmaddr, int shmflg);
 #define shmdt libandroid_shmdt
 extern int shmdt(void const* shmaddr);
 
+extern int libandroid_shmat_fd(int shmid, size_t* out_size);
+extern int libandroid_shmdt_fd(int fd);
+
 __END_DECLS
 
 #endif
