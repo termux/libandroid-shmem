@@ -451,7 +451,9 @@ void* shmat(int shmid, void const* shmaddr, int shmflg)
 	}
 
 	if (shmem[idx].addr == NULL) {
-		shmem[idx].addr = mmap((void*) shmaddr, shmem[idx].size, PROT_READ | (shmflg == 0 ? PROT_WRITE : 0), MAP_SHARED, shmem[idx].descriptor, 0);
+		int mmap_prot = PROT_READ | ((shmflg & SHM_RDONLY) == 0 ? PROT_WRITE : 0);
+		int mmap_flags = MAP_SHARED | (shmaddr != 0 ? MAP_FIXED : 0);
+		shmem[idx].addr = mmap((void*) shmaddr, shmem[idx].size, mmap_prot, mmap_flags, shmem[idx].descriptor, 0);
 		if (shmem[idx].addr == MAP_FAILED) {
 			DBG ("%s: mmap() failed for ID %x FD %d: %s", __PRETTY_FUNCTION__, idx, shmem[idx].descriptor, strerror(errno));
 			shmem[idx].addr = NULL;
