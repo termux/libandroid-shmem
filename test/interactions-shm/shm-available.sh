@@ -1,6 +1,6 @@
 #!/bin/sh
 
-status=$(pidof -q test-host && echo yes || echo no)
+status=$(grep global-shmem /proc/*/comm | wc -l)
 echo "host available: $status"
 [ "${status}" = "${1}" ]
 exit $?

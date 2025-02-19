@@ -13,54 +13,19 @@ cleanup-memory: test
 	../cleanup-shared-memory.sh
 endif
 
-test: testcase-1 testcase-2 testcase-3
+test: testcase-1 testcase-2 testcase-3 testcase-4
 
-testcase-1: test-host test-remove host-available.sh
-	./test-host &
-	sleep 0.1
+testcase-1: test-create-shm test-remove shm-available.sh testcase-1.sh
+	bash ./testcase-1.sh
 
-	./test-remove
-	./host-available.sh no
+testcase-2: test-create-shm test-write test-read test-remove shm-available.sh testcase-2.sh
+	bash ./testcase-2.sh
 
-testcase-2: test-host test-write test-read test-remove host-available.sh
-	./test-host &
-	sleep 0.1
+testcase-3: test-create-shm test-create-ipc test-remove shm-available.sh testcase-3.sh
+	bash ./testcase-3.sh
 
-	./test-host && exit 1 || true
-	./host-available.sh yes
-
-	./test-write
-	./test-read
-
-	./test-remove
-
-testcase-3: test-host test-write test-read test-endless-attachment test-status test-remove host-available.sh check-attachments.sh
-	./test-host &
-	sleep 0.1
-
-	./check-attachments.sh
-
-	./test-endless-attachment &
-	sleep 0.1
-
-	./check-attachments.sh
-
-	./test-endless-attachment &
-	sleep 0.1
-
-	./check-attachments.sh
-
-	./test-remove
-	./host-available.sh yes
-
-	kill $$(pidof -s test-endless-attachment)
-	./host-available.sh yes
-
-	./test-write
-	./test-read
-
-	kill $$(pidof -s test-endless-attachment)
-	./host-available.sh no
+testcase-4: test-create-shm test-write test-read test-endless-attachment test-status test-remove shm-available.sh check-attachments.sh
+	bash ./testcase-4.sh
 
 test-%: %.c $(EXTRA_CFILE)
 	$(CC) $(CFLAGS) $+ -o $@
