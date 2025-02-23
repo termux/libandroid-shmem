@@ -2,3 +2,4 @@
 *.so
 tags
 test/test-*
+test/interactions-shm/test-*

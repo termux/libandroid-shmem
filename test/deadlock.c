@@ -6,6 +6,7 @@ int main() {
     int shmid_from_shmget;
     if ((shmid_from_shmget = shmget(SHMEM_KEY, 30, IPC_CREAT | 0666)) < 0) error_exit("shmget");
     if ((shmid_from_shmget = shmget(SHMEM_KEY, 30, IPC_CREAT | 0666)) < 0) error_exit("shmget");
+    if (shmctl(shmid_from_shmget, IPC_RMID, 0) == -1) error_exit("shmctl");
 
     return 0;
 }
