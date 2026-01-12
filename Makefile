@@ -5,7 +5,7 @@ libandroid-shmem.a: shmem.o
 	$(AR) rcu $@ shmem.o
 
 libandroid-shmem.so: shmem.o
-	$(CC) $(LDFLAGS) -shared shmem.o -o $@ -llog
+	$(CC) $(LDFLAGS) -shared shmem.o -o $@ -llog -landroid
 
 shmem.o: shmem.c shm.h
 	$(CC) $(CFLAGS) -c shmem.c -o $@

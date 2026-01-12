@@ -1,4 +1,7 @@
 #include <android/log.h>
+#if __ANDROID_API__ >= 26
+#include <android/sharedmem.h>
+#endif
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -12,8 +15,10 @@
 #include <unistd.h>
 #include <paths.h>
 
+#if __ANDROID_API__ < 26
 #define __u32 uint32_t
 #include <linux/ashmem.h>
+#endif
 
 #include "shm.h"
 
@@ -108,14 +113,14 @@ static int ancil_recv_fd(int sock)
 
 static int ashmem_get_size_region(int fd)
 {
-	//int ret = __ashmem_is_ashmem(fd, 1);
-	//if (ret < 0) return ret;
+#if __ANDROID_API__ >= 26
+	return ASharedMemory_getSize(fd);
+#else
 	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
+#endif
 }
 
 /*
- * From https://android.googlesource.com/platform/system/core/+/master/libcutils/ashmem-dev.c
- *
  * ashmem_create_region - creates a new named ashmem region and returns the file
  * descriptor, or <0 on error.
  *
@@ -124,6 +129,10 @@ static int ashmem_get_size_region(int fd)
  */
 static int ashmem_create_region(char const* name, size_t size)
 {
+#if __ANDROID_API__ >= 26
+	return ASharedMemory_create(name, size);
+#else
+	// From https://android.googlesource.com/platform/system/core/+/master/libcutils/ashmem-dev.c
 	int fd = open("/dev/ashmem", O_RDWR);
 	if (fd < 0) return fd;
 
@@ -141,6 +150,7 @@ static int ashmem_create_region(char const* name, size_t size)
 error:
 	close(fd);
 	return ret;
+#endif
 }
 
 static void ashv_check_pid()
