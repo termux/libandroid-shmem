@@ -11,6 +11,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <paths.h>
@@ -111,46 +113,39 @@ static int ancil_recv_fd(int sock)
 	return ((int*) CMSG_DATA(cmsg))[0];
 }
 
-static int ashmem_get_size_region(int fd)
+static int memfd_get_size_region(int fd)
 {
-#if __ANDROID_API__ >= 26
-	return ASharedMemory_getSize(fd);
-#else
-	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
-#endif
+	struct stat st;
+	if (fstat(fd, &st) < 0) return -1;
+	return (int)st.st_size;
 }
 
 /*
- * ashmem_create_region - creates a new named ashmem region and returns the file
+ * memfd_create_region - creates a new named memfd region and returns the file
  * descriptor, or <0 on error.
  *
- * `name' is the label to give the region (visible in /proc/pid/maps)
+ * memfd is anonymous memory (no /dev path, no filesystem footprint).
+ * Works on Android 10+ (API 29+) where memfd_create is available.
+ *
+ * `name' is the label to give the region (visible in /proc/self/fd/<n>)
  * `size' is the size of the region, in page-aligned bytes
  */
-static int ashmem_create_region(char const* name, size_t size)
+static int memfd_create_region(char const* name, size_t size)
 {
-#if __ANDROID_API__ >= 26
-	return ASharedMemory_create(name, size);
-#else
-	// From https://android.googlesource.com/platform/system/core/+/master/libcutils/ashmem-dev.c
-	int fd = open("/dev/ashmem", O_RDWR);
+	// Use memfd_create instead of ashmem — ashmem SET_SIZE ioctl
+	// returns ENOTTY on Honor 5.10.226 (kernel has deprecated ashmem).
+	//
+	// memfd_create syscall is available on Android 10+ (API 29+),
+	// Honor ALT-AN00 runs Android 14 (API 34).
+	int fd = syscall(279, name, 1);  // SYS_memfd_create = 279 on arm64, MFD_CLOEXEC=1
 	if (fd < 0) return fd;
 
-	char name_buffer[ASHMEM_NAME_LEN] = {0};
-	strncpy(name_buffer, name, sizeof(name_buffer));
-	name_buffer[sizeof(name_buffer)-1] = 0;
-
-	int ret = ioctl(fd, ASHMEM_SET_NAME, name_buffer);
-	if (ret < 0) goto error;
-
-	ret = ioctl(fd, ASHMEM_SET_SIZE, size);
-	if (ret < 0) goto error;
+	if (ftruncate(fd, (off_t)size) < 0) {
+		close(fd);
+		return -1;
+	}
 
 	return fd;
-error:
-	close(fd);
-	return ret;
-#endif
 }
 
 static void ashv_check_pid()
@@ -275,9 +270,9 @@ static int ashv_read_remote_segment(int shmid)
 	}
 	close(recvsock);
 
-	int size = ashmem_get_size_region(descriptor);
+	int size = memfd_get_size_region(descriptor);
 	if (size == 0 || size == -1) {
-		DBG ("%s: ERROR: ashmem_get_size_region() returned %d on socket %s: %s", __PRETTY_FUNCTION__, size, addr.sun_path + 1, strerror(errno));
+		DBG ("%s: ERROR: memfd_get_size_region() returned %d on socket %s: %s", __PRETTY_FUNCTION__, size, addr.sun_path + 1, strerror(errno));
 		return -1;
 	}
 
@@ -399,14 +394,14 @@ int shmget(key_t key, size_t size, int flags)
 	shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
 	size = ROUND_UP(size, getpagesize());
 	shmem[idx].size = size;
-	shmem[idx].descriptor = ashmem_create_region(buf, size);
+	shmem[idx].descriptor = memfd_create_region(buf, size);
 	shmem[idx].addr = NULL;
 	shmem[idx].id = shmid;
 	shmem[idx].markedForDeletion = false;
 	shmem[idx].key = key;
 
 	if (shmem[idx].descriptor < 0) {
-		DBG("%s: ashmem_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
+		DBG("%s: memfd_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
 		shmem_amount --;
 		shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
 		pthread_mutex_unlock (&mutex);
