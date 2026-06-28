@@ -9,7 +9,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#define _GNU_SOURCE
 #include <sys/mman.h>
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -128,7 +132,7 @@ static int shmem_create_region(char const* name, size_t size)
 
 	// 1) memfd_create — Linux 3.17+, available on most Android 10+ devices
 	//    Use direct syscall for NDK compatibility.
-	fd = syscall(279, name, 1);  // SYS_memfd_create=279 (arm64), MFD_CLOEXEC=1
+	fd = memfd_create(name, MFD_CLOEXEC);
 	if (fd >= 0) {
 		if (ftruncate(fd, (off_t)size) == 0)
 			return fd;
