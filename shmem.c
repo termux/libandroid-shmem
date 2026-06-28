@@ -1,7 +1,5 @@
 #include <android/log.h>
-#if __ANDROID_API__ >= 26
-#include <android/sharedmem.h>
-#endif
+#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -45,10 +43,8 @@
 #endif
 #endif
 
-#if __ANDROID_API__ < 26
 #define __u32 uint32_t
 #include <linux/ashmem.h>
-#endif
 
 #include "shm.h"
 
@@ -163,12 +159,21 @@ static int shmem_create_region(char const* name, size_t size)
 		close(fd);
 	}
 
-	// 2) ASharedMemory — Android 8+ (API 26+)
-#if __ANDROID_API__ >= 26
-	fd = ASharedMemory_create(name, size);
-	if (fd >= 0)
-		return fd;
-#endif
+	// 2) ASharedMemory — Android 8+ (API 26+), probed at runtime
+	//    because the library may be compiled at API 24 but run on API 26+.
+	{
+		static int (*p_ASharedMemory_create)(const char*, size_t) = NULL;
+		static int probed = 0;
+		if (!probed) {
+			void *lib = dlopen("libandroid.so", RTLD_NOW);
+			if (lib) p_ASharedMemory_create = dlsym(lib, "ASharedMemory_create");
+			probed = 1;
+		}
+		if (p_ASharedMemory_create) {
+			fd = p_ASharedMemory_create(name, size);
+			if (fd >= 0) return fd;
+		}
+	}
 
 	// 3) /dev/ashmem — legacy, may return ENOTTY on newer kernels
 	fd = open("/dev/ashmem", O_RDWR);
@@ -199,11 +204,20 @@ static int shmem_get_size_region(int fd)
 		return (int)st.st_size;
 
 	// Fall back to backend-specific size query
-#if __ANDROID_API__ >= 26
-	return ASharedMemory_getSize(fd);
-#else
+	{
+		static int (*p_ASharedMemory_getSize)(int) = NULL;
+		static int probed_size = 0;
+		if (!probed_size) {
+			void *lib = dlopen("libandroid.so", RTLD_NOW);
+			if (lib) p_ASharedMemory_getSize = dlsym(lib, "ASharedMemory_getSize");
+			probed_size = 1;
+		}
+		if (p_ASharedMemory_getSize) {
+			int ret = p_ASharedMemory_getSize(fd);
+			if (ret > 0) return ret;
+		}
+	}
 	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
-#endif
 }
 
 static void ashv_check_pid()
