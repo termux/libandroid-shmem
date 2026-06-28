@@ -14,12 +14,36 @@
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <linux/memfd.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <paths.h>
+
+/*
+ * __NR_memfd_create may not be defined in NDK headers for older API levels.
+ * Define per-architecture if missing.
+ */
+#ifndef __NR_memfd_create
+#if defined(__aarch64__)
+#define __NR_memfd_create 279
+#elif defined(__arm__)
+#define __NR_memfd_create 385
+#elif defined(__x86_64__)
+#define __NR_memfd_create 319
+#elif defined(__i386__)
+#define __NR_memfd_create 356
+#elif defined(__riscv) && __riscv_xlen == 64
+#define __NR_memfd_create 286
+#else
+#error "Unknown architecture: __NR_memfd_create not defined"
+#endif
+#endif
 
 #if __ANDROID_API__ < 26
 #define __u32 uint32_t
@@ -132,7 +156,7 @@ static int shmem_create_region(char const* name, size_t size)
 
 	// 1) memfd_create — Linux 3.17+, available on most Android 10+ devices
 	//    Use direct syscall for NDK compatibility.
-	fd = memfd_create(name, MFD_CLOEXEC);
+	fd = syscall(__NR_memfd_create, name, MFD_CLOEXEC);
 	if (fd >= 0) {
 		if (ftruncate(fd, (off_t)size) == 0)
 			return fd;
