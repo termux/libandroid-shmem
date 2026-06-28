@@ -113,39 +113,70 @@ static int ancil_recv_fd(int sock)
 	return ((int*) CMSG_DATA(cmsg))[0];
 }
 
-static int memfd_get_size_region(int fd)
+static int shmem_get_size_region(int fd)
 {
+#if __ANDROID_API__ >= 30
+	// memfd path: use fstat
 	struct stat st;
 	if (fstat(fd, &st) < 0) return -1;
 	return (int)st.st_size;
+#elif __ANDROID_API__ >= 26
+	return ASharedMemory_getSize(fd);
+#else
+	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
+#endif
 }
 
 /*
- * memfd_create_region - creates a new named memfd region and returns the file
- * descriptor, or <0 on error.
+ * shmem_create_region - creates a new shared memory region and returns
+ * the file descriptor, or <0 on error.
  *
- * memfd is anonymous memory (no /dev path, no filesystem footprint).
- * Works on Android 10+ (API 29+) where memfd_create is available.
+ * API 30+ (Android 11+): memfd_create via syscall.
+ *   - No /dev/ashmem dependency (ashmem deprecated on newer kernels,
+ *     e.g. Honor 5.10.226 returns ENOTTY from SET_SIZE).
+ *   - Anonymous memory, no filesystem path.
  *
- * `name' is the label to give the region (visible in /proc/self/fd/<n>)
- * `size' is the size of the region, in page-aligned bytes
+ * API 26-29: ASharedMemory_create (Android NDK ashmem wrapper).
+ * API <26:  open("/dev/ashmem") + ioctl (legacy).
+ *
+ * `name' is the label for the region.
+ * `size' is the region size, rounded up to page boundary by caller.
  */
-static int memfd_create_region(char const* name, size_t size)
+static int shmem_create_region(char const* name, size_t size)
 {
-	// Use memfd_create instead of ashmem — ashmem SET_SIZE ioctl
-	// returns ENOTTY on Honor 5.10.226 (kernel has deprecated ashmem).
-	//
-	// memfd_create syscall is available on Android 10+ (API 29+),
-	// Honor ALT-AN00 runs Android 14 (API 34).
-	int fd = syscall(279, name, 1);  // SYS_memfd_create = 279 on arm64, MFD_CLOEXEC=1
+#if __ANDROID_API__ >= 30
+	// Use direct syscall for compatibility with older NDK versions
+	// that may not expose memfd_create wrapper.
+	int fd = syscall(279, name, 1);  // SYS_memfd_create = 279 (arm64), MFD_CLOEXEC=1
 	if (fd < 0) return fd;
 
 	if (ftruncate(fd, (off_t)size) < 0) {
 		close(fd);
 		return -1;
 	}
+	return fd;
+#elif __ANDROID_API__ >= 26
+	return ASharedMemory_create(name, size);
+#else
+	// Legacy ashmem path for Android < 8.0 (API < 26)
+	int fd = open("/dev/ashmem", O_RDWR);
+	if (fd < 0) return fd;
+
+	char name_buffer[ASHMEM_NAME_LEN] = {0};
+	strncpy(name_buffer, name, sizeof(name_buffer));
+	name_buffer[sizeof(name_buffer)-1] = 0;
+
+	int ret = ioctl(fd, ASHMEM_SET_NAME, name_buffer);
+	if (ret < 0) goto error;
+
+	ret = ioctl(fd, ASHMEM_SET_SIZE, size);
+	if (ret < 0) goto error;
 
 	return fd;
+error:
+	close(fd);
+	return ret;
+#endif
 }
 
 static void ashv_check_pid()
@@ -270,9 +301,9 @@ static int ashv_read_remote_segment(int shmid)
 	}
 	close(recvsock);
 
-	int size = memfd_get_size_region(descriptor);
+	int size = shmem_get_size_region(descriptor);
 	if (size == 0 || size == -1) {
-		DBG ("%s: ERROR: memfd_get_size_region() returned %d on socket %s: %s", __PRETTY_FUNCTION__, size, addr.sun_path + 1, strerror(errno));
+		DBG ("%s: ERROR: shmem_get_size_region() returned %d on socket %s: %s", __PRETTY_FUNCTION__, size, addr.sun_path + 1, strerror(errno));
 		return -1;
 	}
 
@@ -394,14 +425,14 @@ int shmget(key_t key, size_t size, int flags)
 	shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
 	size = ROUND_UP(size, getpagesize());
 	shmem[idx].size = size;
-	shmem[idx].descriptor = memfd_create_region(buf, size);
+	shmem[idx].descriptor = shmem_create_region(buf, size);
 	shmem[idx].addr = NULL;
 	shmem[idx].id = shmid;
 	shmem[idx].markedForDeletion = false;
 	shmem[idx].key = key;
 
 	if (shmem[idx].descriptor < 0) {
-		DBG("%s: memfd_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
+		DBG("%s: shmem_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
 		shmem_amount --;
 		shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
 		pthread_mutex_unlock (&mutex);
