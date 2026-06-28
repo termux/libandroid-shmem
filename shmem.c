@@ -191,12 +191,14 @@ error:
 
 static int shmem_get_size_region(int fd)
 {
-	// Try fstat first — works for memfd and regular fds
+	// Try fstat first — works for memfd and regular fds.
+	// ashmem fds also succeed fstat but st_size is always 0
+	// (ashmem doesn't maintain i_size, only accessible via ioctl).
 	struct stat st;
-	if (fstat(fd, &st) == 0)
+	if (fstat(fd, &st) == 0 && st.st_size > 0)
 		return (int)st.st_size;
 
-	// Fall back to ashmem-specific ioctl
+	// Fall back to backend-specific size query
 #if __ANDROID_API__ >= 26
 	return ASharedMemory_getSize(fd);
 #else
