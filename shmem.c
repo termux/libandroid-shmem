@@ -1,7 +1,6 @@
+#define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ 1
 #include <android/log.h>
-#if __ANDROID_API__ >= 26
 #include <android/sharedmem.h>
-#endif
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -9,16 +8,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#define _GNU_SOURCE
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <linux/memfd.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <paths.h>
 
-#if __ANDROID_API__ < 26
+#ifndef __NR_memfd_create
+#error "__NR_memfd_create not defined"
+#endif
+
 #define __u32 uint32_t
 #include <linux/ashmem.h>
-#endif
 
 #include "shm.h"
 
@@ -111,46 +116,65 @@ static int ancil_recv_fd(int sock)
 	return ((int*) CMSG_DATA(cmsg))[0];
 }
 
-static int ashmem_get_size_region(int fd)
+/*
+ * Probe backends at runtime from newest/preferred to oldest:
+ *   1. memfd_create  (Linux 3.17+)
+ *   2. ASharedMemory (Android API 26+)
+ *   3. /dev/ashmem    (legacy)
+ */
+static int shmem_create_region(char const* name, size_t size)
 {
-#if __ANDROID_API__ >= 26
-	return ASharedMemory_getSize(fd);
-#else
-	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
-#endif
+	int fd = -1;
+
+	// 1) ASharedMemory — Android 8+ (API 26+), official NDK API.
+	//    Weak symbol: resolves to NULL at runtime on older devices.
+	if (ASharedMemory_create) {
+		fd = ASharedMemory_create(name, size);
+		if (fd >= 0) return fd;
+	}
+
+	// 2) /dev/ashmem — legacy, exists since early Android.
+	fd = open("/dev/ashmem", O_RDWR);
+	if (fd >= 0) {
+		char name_buffer[ASHMEM_NAME_LEN] = {0};
+		strncpy(name_buffer, name, sizeof(name_buffer));
+		name_buffer[sizeof(name_buffer)-1] = 0;
+
+		if (ioctl(fd, ASHMEM_SET_NAME, name_buffer) == 0 &&
+		    ioctl(fd, ASHMEM_SET_SIZE, size) == 0)
+			return fd;
+		close(fd);
+	}
+
+	// 3) memfd_create — Linux 3.17+. Last resort: seccomp on Android 8–9
+	//    may kill the process with SIGSYS instead of returning ENOSYS.
+	//    Only reached when neither ASharedMemory nor /dev/ashmem exist
+	//    (e.g. termux-docker / non-Android PRoot).
+	fd = syscall(__NR_memfd_create, name, MFD_CLOEXEC);
+	if (fd >= 0) {
+		if (ftruncate(fd, (off_t)size) == 0)
+			return fd;
+		close(fd);
+	}
+
+	return -1;
 }
 
-/*
- * ashmem_create_region - creates a new named ashmem region and returns the file
- * descriptor, or <0 on error.
- *
- * `name' is the label to give the region (visible in /proc/pid/maps)
- * `size' is the size of the region, in page-aligned bytes
- */
-static int ashmem_create_region(char const* name, size_t size)
+static int shmem_get_size_region(int fd)
 {
-#if __ANDROID_API__ >= 26
-	return ASharedMemory_create(name, size);
-#else
-	// From https://android.googlesource.com/platform/system/core/+/master/libcutils/ashmem-dev.c
-	int fd = open("/dev/ashmem", O_RDWR);
-	if (fd < 0) return fd;
+	// Try fstat first — works for memfd and regular fds.
+	// ashmem fds also succeed fstat but st_size is always 0
+	// (ashmem doesn't maintain i_size, only accessible via ioctl).
+	struct stat st;
+	if (fstat(fd, &st) == 0 && st.st_size > 0)
+		return (int)st.st_size;
 
-	char name_buffer[ASHMEM_NAME_LEN] = {0};
-	strncpy(name_buffer, name, sizeof(name_buffer));
-	name_buffer[sizeof(name_buffer)-1] = 0;
-
-	int ret = ioctl(fd, ASHMEM_SET_NAME, name_buffer);
-	if (ret < 0) goto error;
-
-	ret = ioctl(fd, ASHMEM_SET_SIZE, size);
-	if (ret < 0) goto error;
-
-	return fd;
-error:
-	close(fd);
-	return ret;
-#endif
+	// Fall back to backend-specific size query
+	if (ASharedMemory_getSize) {
+		int ret = ASharedMemory_getSize(fd);
+		if (ret > 0) return ret;
+	}
+	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
 }
 
 static void ashv_check_pid()
@@ -275,9 +299,9 @@ static int ashv_read_remote_segment(int shmid)
 	}
 	close(recvsock);
 
-	int size = ashmem_get_size_region(descriptor);
+	int size = shmem_get_size_region(descriptor);
 	if (size == 0 || size == -1) {
-		DBG ("%s: ERROR: ashmem_get_size_region() returned %d on socket %s: %s", __PRETTY_FUNCTION__, size, addr.sun_path + 1, strerror(errno));
+		DBG ("%s: ERROR: shmem_get_size_region() returned %d on socket %s: %s", __PRETTY_FUNCTION__, size, addr.sun_path + 1, strerror(errno));
 		return -1;
 	}
 
@@ -399,14 +423,14 @@ int shmget(key_t key, size_t size, int flags)
 	shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
 	size = ROUND_UP(size, getpagesize());
 	shmem[idx].size = size;
-	shmem[idx].descriptor = ashmem_create_region(buf, size);
+	shmem[idx].descriptor = shmem_create_region(buf, size);
 	shmem[idx].addr = NULL;
 	shmem[idx].id = shmid;
 	shmem[idx].markedForDeletion = false;
 	shmem[idx].key = key;
 
 	if (shmem[idx].descriptor < 0) {
-		DBG("%s: ashmem_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
+		DBG("%s: shmem_create_region() failed for size %zu: %s", __PRETTY_FUNCTION__, size, strerror(errno));
 		shmem_amount --;
 		shmem = realloc(shmem, shmem_amount * sizeof(shmem_t));
 		pthread_mutex_unlock (&mutex);
