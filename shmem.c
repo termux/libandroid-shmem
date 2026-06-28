@@ -120,7 +120,9 @@ static int ancil_recv_fd(int sock)
  * Probe backends at runtime from newest/preferred to oldest:
  *   1. memfd_create  (Linux 3.17+)
  *   2. ASharedMemory (Android API 26+)
- *   3. /dev/ashmem    (legacy, deprecated on newer kernels)
+ *   3. /dev/ashmem    (legacy)
+ *   4. dma-buf heap   (Android 10+, /dev/dma_heap/system)
+ *   5. ion            (Android 4.0–9, /dev/ion)
  */
 static int shmem_create_region(char const* name, size_t size)
 {
@@ -143,25 +145,59 @@ static int shmem_create_region(char const* name, size_t size)
 
 	// 3) /dev/ashmem — legacy, may return ENOTTY on newer kernels
 	fd = open("/dev/ashmem", O_RDWR);
-	if (fd < 0) return fd;
+	if (fd >= 0) {
+		char name_buffer[ASHMEM_NAME_LEN] = {0};
+		strncpy(name_buffer, name, sizeof(name_buffer));
+		name_buffer[sizeof(name_buffer)-1] = 0;
 
-	char name_buffer[ASHMEM_NAME_LEN] = {0};
-	strncpy(name_buffer, name, sizeof(name_buffer));
-	name_buffer[sizeof(name_buffer)-1] = 0;
-
-	if (ioctl(fd, ASHMEM_SET_NAME, name_buffer) < 0)
-		goto error;
-	if (ioctl(fd, ASHMEM_SET_SIZE, size) < 0)
-		goto error;
-
-	return fd;
-error:
-	{
-		int save_errno = errno;
+		if (ioctl(fd, ASHMEM_SET_NAME, name_buffer) == 0 &&
+		    ioctl(fd, ASHMEM_SET_SIZE, size) == 0)
+			return fd;
 		close(fd);
-		errno = save_errno;
-		return -1;
 	}
+
+	// 4) dma-buf heap — Android 10+ (/dev/dma_heap/system)
+	{
+		int heap_fd = open("/dev/dma_heap/system", O_RDWR | O_CLOEXEC);
+		if (heap_fd >= 0) {
+			struct dma_heap_allocation_data {
+				__u64 len;
+				__u32 fd;
+				__u32 fd_flags;
+				__u64 heap_flags;
+			} data = { .len = size, .fd_flags = O_RDWR | O_CLOEXEC };
+			int ret = ioctl(heap_fd, _IOWR(0x48, 0x00, struct dma_heap_allocation_data), &data);
+			close(heap_fd);
+			if (ret == 0) return (int)data.fd;
+		}
+	}
+
+	// 5) ion — Android 4.0–9 (/dev/ion)
+	{
+		int ion_fd = open("/dev/ion", O_RDWR);
+		if (ion_fd >= 0) {
+			struct ion_allocation_data {
+				__u64 len;
+				__u32 heap_id_mask;
+				__u32 flags;
+				__u32 handle;
+				__u32 unused;
+			} alloc = { .len = size, .heap_id_mask = 1 /*ION_HEAP_SYSTEM*/ };
+			if (ioctl(ion_fd, _IOWR(0x49, 0x00, struct ion_allocation_data), &alloc) == 0) {
+				struct ion_fd_data {
+					__u32 handle;
+					__u32 fd;
+				} fd_data = { .handle = alloc.handle };
+				if (ioctl(ion_fd, _IOWR(0x49, 0x08, struct ion_fd_data), &fd_data) == 0) {
+					close(ion_fd);
+					return (int)fd_data.fd;
+				}
+			}
+			close(ion_fd);
+		}
+	}
+
+	return -1;
 }
 
 static int shmem_get_size_region(int fd)
