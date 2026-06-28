@@ -113,69 +113,66 @@ static int ancil_recv_fd(int sock)
 	return ((int*) CMSG_DATA(cmsg))[0];
 }
 
-static int shmem_get_size_region(int fd)
-{
-#if __ANDROID_API__ >= 30
-	// memfd path: use fstat
-	struct stat st;
-	if (fstat(fd, &st) < 0) return -1;
-	return (int)st.st_size;
-#elif __ANDROID_API__ >= 26
-	return ASharedMemory_getSize(fd);
-#else
-	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
-#endif
-}
-
 /*
- * shmem_create_region - creates a new shared memory region and returns
- * the file descriptor, or <0 on error.
+ * Probe backends at runtime from newest/preferred to oldest:
+ *   1. memfd_create  (Linux 3.17+, anonymous, no FS dependency)
+ *   2. ASharedMemory (Android API 26+, NDK ashmem wrapper)
+ *   3. /dev/ashmem    (legacy, deprecated on some kernels)
  *
- * API 30+ (Android 11+): memfd_create via syscall.
- *   - No /dev/ashmem dependency (ashmem deprecated on newer kernels,
- *     e.g. Honor 5.10.226 returns ENOTTY from SET_SIZE).
- *   - Anonymous memory, no filesystem path.
- *
- * API 26-29: ASharedMemory_create (Android NDK ashmem wrapper).
- * API <26:  open("/dev/ashmem") + ioctl (legacy).
- *
- * `name' is the label for the region.
- * `size' is the region size, rounded up to page boundary by caller.
+ * On newer devices (Honor kernel 5.10.226), ashmem SET_SIZE returns
+ * ENOTTY even though /dev/ashmem exists. Runtime fallback handles this.
  */
 static int shmem_create_region(char const* name, size_t size)
 {
-#if __ANDROID_API__ >= 30
-	// Use direct syscall for compatibility with older NDK versions
-	// that may not expose memfd_create wrapper.
-	int fd = syscall(279, name, 1);  // SYS_memfd_create = 279 (arm64), MFD_CLOEXEC=1
-	if (fd < 0) return fd;
+	int fd = -1;
 
-	if (ftruncate(fd, (off_t)size) < 0) {
+	// 1) memfd_create — Linux 3.17+, available on most Android 10+ devices
+	//    Use direct syscall for NDK compatibility.
+	fd = syscall(279, name, 1);  // SYS_memfd_create=279 (arm64), MFD_CLOEXEC=1
+	if (fd >= 0) {
+		if (ftruncate(fd, (off_t)size) == 0)
+			return fd;
 		close(fd);
-		return -1;
 	}
-	return fd;
-#elif __ANDROID_API__ >= 26
-	return ASharedMemory_create(name, size);
-#else
-	// Legacy ashmem path for Android < 8.0 (API < 26)
-	int fd = open("/dev/ashmem", O_RDWR);
+
+	// 2) ASharedMemory — Android 8+ (API 26+)
+#if __ANDROID_API__ >= 26
+	fd = ASharedMemory_create(name, size);
+	if (fd >= 0)
+		return fd;
+#endif
+
+	// 3) /dev/ashmem — legacy, may return ENOTTY on newer kernels
+	fd = open("/dev/ashmem", O_RDWR);
 	if (fd < 0) return fd;
 
 	char name_buffer[ASHMEM_NAME_LEN] = {0};
 	strncpy(name_buffer, name, sizeof(name_buffer));
 	name_buffer[sizeof(name_buffer)-1] = 0;
 
-	int ret = ioctl(fd, ASHMEM_SET_NAME, name_buffer);
-	if (ret < 0) goto error;
-
-	ret = ioctl(fd, ASHMEM_SET_SIZE, size);
-	if (ret < 0) goto error;
+	if (ioctl(fd, ASHMEM_SET_NAME, name_buffer) < 0)
+		goto error;
+	if (ioctl(fd, ASHMEM_SET_SIZE, size) < 0)
+		goto error;
 
 	return fd;
 error:
 	close(fd);
-	return ret;
+	return -1;
+}
+
+static int shmem_get_size_region(int fd)
+{
+	// Try fstat first — works for memfd and regular fds
+	struct stat st;
+	if (fstat(fd, &st) == 0)
+		return (int)st.st_size;
+
+	// Fall back to ashmem-specific ioctl
+#if __ANDROID_API__ >= 26
+	return ASharedMemory_getSize(fd);
+#else
+	return TEMP_FAILURE_RETRY(ioctl(fd, ASHMEM_GET_SIZE, NULL));
 #endif
 }
 
