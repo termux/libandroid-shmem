@@ -3,7 +3,7 @@ CFLAGS += -Wall -Wextra -Werror -std=c99
 OS := $(shell uname -o 2> /dev/null)
 
 ifeq ($(OS), Android)
-CFLAGS += -I.. -llog
+CFLAGS += -I.. -llog -landroid
 EXTRA_CFILE = ../shmem.c
 cleanup-memory: test ;
 else
