@@ -24,24 +24,8 @@
 #include <unistd.h>
 #include <paths.h>
 
-/*
- * __NR_memfd_create may not be defined in NDK headers for older API levels.
- * Define per-architecture if missing.
- */
 #ifndef __NR_memfd_create
-#if defined(__aarch64__)
-#define __NR_memfd_create 279
-#elif defined(__arm__)
-#define __NR_memfd_create 385
-#elif defined(__x86_64__)
-#define __NR_memfd_create 319
-#elif defined(__i386__)
-#define __NR_memfd_create 356
-#elif defined(__riscv) && __riscv_xlen == 64
-#define __NR_memfd_create 286
-#else
-#error "Unknown architecture: __NR_memfd_create not defined"
-#endif
+#error "__NR_memfd_create not defined"
 #endif
 
 #define __u32 uint32_t
@@ -181,8 +165,12 @@ static int shmem_create_region(char const* name, size_t size)
 
 	return fd;
 error:
-	close(fd);
-	return -1;
+	{
+		int save_errno = errno;
+		close(fd);
+		errno = save_errno;
+		return -1;
+	}
 }
 
 static int shmem_get_size_region(int fd)
