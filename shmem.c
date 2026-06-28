@@ -126,22 +126,14 @@ static int shmem_create_region(char const* name, size_t size)
 {
 	int fd = -1;
 
-	// 1) memfd_create — Linux 3.17+, available on most Android 10+ devices
-	//    Use direct syscall for NDK compatibility.
-	fd = syscall(__NR_memfd_create, name, MFD_CLOEXEC);
-	if (fd >= 0) {
-		if (ftruncate(fd, (off_t)size) == 0)
-			return fd;
-		close(fd);
-	}
-
-	// 2) ASharedMemory — Android 8+ (API 26+), weak symbol
+	// 1) ASharedMemory — Android 8+ (API 26+), official NDK API.
+	//    Weak symbol: resolves to NULL at runtime on older devices.
 	if (ASharedMemory_create) {
 		fd = ASharedMemory_create(name, size);
 		if (fd >= 0) return fd;
 	}
 
-	// 3) /dev/ashmem — legacy, may return ENOTTY on newer kernels
+	// 2) /dev/ashmem — legacy, exists since early Android.
 	fd = open("/dev/ashmem", O_RDWR);
 	if (fd >= 0) {
 		char name_buffer[ASHMEM_NAME_LEN] = {0};
@@ -150,6 +142,17 @@ static int shmem_create_region(char const* name, size_t size)
 
 		if (ioctl(fd, ASHMEM_SET_NAME, name_buffer) == 0 &&
 		    ioctl(fd, ASHMEM_SET_SIZE, size) == 0)
+			return fd;
+		close(fd);
+	}
+
+	// 3) memfd_create — Linux 3.17+. Last resort: seccomp on Android 8–9
+	//    may kill the process with SIGSYS instead of returning ENOSYS.
+	//    Only reached when neither ASharedMemory nor /dev/ashmem exist
+	//    (e.g. termux-docker / non-Android PRoot).
+	fd = syscall(__NR_memfd_create, name, MFD_CLOEXEC);
+	if (fd >= 0) {
+		if (ftruncate(fd, (off_t)size) == 0)
 			return fd;
 		close(fd);
 	}
