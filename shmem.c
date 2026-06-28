@@ -10,12 +10,6 @@
 #include <string.h>
 #define _GNU_SOURCE
 #include <sys/mman.h>
-#ifndef MFD_CLOEXEC
-#define MFD_CLOEXEC 0x0001U
-#endif
-#ifndef MFD_ALLOW_SEALING
-#define MFD_ALLOW_SEALING 0x0002U
-#endif
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -124,12 +118,9 @@ static int ancil_recv_fd(int sock)
 
 /*
  * Probe backends at runtime from newest/preferred to oldest:
- *   1. memfd_create  (Linux 3.17+, anonymous, no FS dependency)
- *   2. ASharedMemory (Android API 26+, NDK ashmem wrapper)
- *   3. /dev/ashmem    (legacy, deprecated on some kernels)
- *
- * On newer devices (Honor kernel 5.10.226), ashmem SET_SIZE returns
- * ENOTTY even though /dev/ashmem exists. Runtime fallback handles this.
+ *   1. memfd_create  (Linux 3.17+)
+ *   2. ASharedMemory (Android API 26+)
+ *   3. /dev/ashmem    (legacy, deprecated on newer kernels)
  */
 static int shmem_create_region(char const* name, size_t size)
 {
