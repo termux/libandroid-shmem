@@ -21,6 +21,7 @@
 #endif
 
 #include "shm.h"
+#include "shm_vanilla.h"
 
 #define DBG(...) __android_log_print(ANDROID_LOG_INFO, "shmem", __VA_ARGS__)
 #define ASHV_KEY_SYMLINK_PATH _PATH_TMP "ashv_key_%d"
@@ -151,6 +152,21 @@ error:
 	close(fd);
 	return ret;
 #endif
+}
+
+static bool ashmem_is_available(void) {
+#if __ANDROID_API__ >= 26
+	int fd = ASharedMemory_create("libandroid-shmem-test", 1);
+	if (fd == -1) {
+#else
+	if (access("/dev/ashmem", F_OK) != 0) {
+#endif
+	   return false;
+	}
+#if __ANDROID_API__ >= 26
+	close(fd);
+#endif
+	return true;
 }
 
 static void ashv_check_pid()
@@ -296,7 +312,9 @@ static int ashv_read_remote_segment(int shmid)
 /* Get shared memory area identifier. */
 int shmget(key_t key, size_t size, int flags)
 {
-	(void) flags;
+	if (!ashmem_is_available()) {
+		return shmget_vanilla(key, size, flags);
+	}
 
 	ashv_check_pid();
 
@@ -441,6 +459,10 @@ int shmget(key_t key, size_t size, int flags)
 /* Attach shared memory segment. */
 void* shmat(int shmid, void const* shmaddr, int shmflg)
 {
+	if (!ashmem_is_available()) {
+		return shmat_vanilla(shmid, shmaddr, shmflg);
+	}
+
 	ashv_check_pid();
 
 	int socket_id = ashv_socket_id_from_shmid(shmid);
@@ -479,6 +501,10 @@ void* shmat(int shmid, void const* shmaddr, int shmflg)
 /* Detach shared memory segment. */
 int shmdt(void const* shmaddr)
 {
+	if (!ashmem_is_available()) {
+		return shmdt_vanilla(shmaddr);
+	}
+
 	ashv_check_pid();
 
 	pthread_mutex_lock(&mutex);
@@ -561,6 +587,10 @@ int libandroid_shmdt_fd(int fd)
 /* Shared memory control operation. */
 int shmctl(int shmid, int cmd, struct shmid_ds *buf)
 {
+	if (!ashmem_is_available()) {
+		return shmctl_vanilla(shmid, cmd, buf);
+	}
+
 	ashv_check_pid();
 
 	if (cmd == IPC_RMID) {
