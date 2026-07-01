@@ -1,11 +1,11 @@
 CFLAGS += -fpic -shared -std=c11 -Wall -Wextra
 LDFLAGS += -Wl,--version-script=exports.txt
 
-libandroid-shmem.a: shmem.o
-	$(AR) rcu $@ shmem.o
+libandroid-shmem.a: shmem.o shmem_vanilla.o
+	$(AR) rcu $@ shmem.o shmem_vanilla.o
 
-libandroid-shmem.so: shmem.o
-	$(CC) $(LDFLAGS) -shared shmem.o -o $@ -llog -landroid
+libandroid-shmem.so: shmem.o shmem_vanilla.o
+	$(CC) $(LDFLAGS) -shared shmem.o shmem_vanilla.o -o $@ -llog -landroid
 
 shmem.o: shmem.c shm.h
 	$(CC) $(CFLAGS) -c shmem.c -o $@

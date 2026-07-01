@@ -4,11 +4,11 @@ OS := $(shell uname -o 2> /dev/null)
 
 ifeq ($(OS), Android)
 CFLAGS += -I.. -llog
-EXTRA_CFILE = ../shmem.c
+EXTRA_CFILES = ../shmem.c ../shmem_vanilla.c
 cleanup-memory: test ;
 else
 CFLAGS += -DSYSV_ASHMEM_TEST_SYSTEM
-EXTRA_CFILE =
+EXTRA_CFILES =
 cleanup-memory: test
 	./cleanup-shared-memory.sh
 endif
@@ -18,7 +18,7 @@ test: $(addprefix testcase-,$(patsubst %.c,%,$(wildcard *.c))) ;
 testcase-% : test-%
 	./$^
 
-test-%: %.c $(EXTRA_CFILE)
+test-%: %.c $(EXTRA_CFILES)
 	$(CC) $(CFLAGS) $+ -o $@
 
 clean:
