@@ -25,6 +25,7 @@ int main() {
 		if ((shm_child = shmat(shmid, NULL, 0)) == (char*) -1) error_exit("shmat-child");
 		shm_child[1] = '#';
 		if (shmdt(shm_child) != 0) error_exit("shmdt-child-2");
+		if (shmctl(shmid, IPC_RMID, 0) == -1) error_exit("shmctl-child");
 
 		// Create a new shared memory segment in the child to check that the
 		// parent can access it.
@@ -40,6 +41,7 @@ int main() {
 		int dummy;
 		if (read(exit_pipes[0], &dummy, sizeof(int)) != sizeof(int)) error_exit("read-pipe");
 
+		if (shmctl(shmid, IPC_RMID, 0) == -1) error_exit("shmctl-child-2");
 		return 0;
 	} else {
 		int shmid_from_child;

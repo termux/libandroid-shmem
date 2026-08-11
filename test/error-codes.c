@@ -8,4 +8,5 @@ int main() {
 	if (errno != EINVAL) error_exit("shmat-wrong-errno");
 	int shmid;
 	if ((shmid = shmget(IPC_PRIVATE, 30, IPC_CREAT | 0666)) < 0) error_exit("shmget");
+	if (shmctl(shmid, IPC_RMID, 0) == -1) error_exit("shmctl");
 }

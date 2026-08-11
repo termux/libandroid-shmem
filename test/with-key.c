@@ -36,6 +36,7 @@ int main() {
 		if ((shm_child = shmat(shmid, NULL, 0)) == (char*) -1) error_exit("shmat-child-2");
 		shm_child[1] = '#';
 		if (shmdt(shm_child) != 0) error_exit("shmdt-child-2");
+		if (shmctl(shmid, IPC_RMID, 0) == -1) error_exit("shmctl-child");
 		return 0;
 	} else {
 		int shmid;

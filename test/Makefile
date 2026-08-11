@@ -1,4 +1,4 @@
-CFLAGS += -Wall -Wextra -Werror -std=c99
+CFLAGS += -Wall -Wextra -Werror -std=c99 -DTEST
 
 OS := $(shell uname -o 2> /dev/null)
 
@@ -13,7 +13,7 @@ cleanup-memory: test
 	./cleanup-shared-memory.sh
 endif
 
-test: $(addprefix testcase-,$(patsubst %.c,%,$(wildcard *.c))) ;
+test: $(addprefix testcase-,$(patsubst %.c,%,$(wildcard *.c))) test-interactions-shm ;
 
 testcase-% : test-%
 	./$^
@@ -21,8 +21,12 @@ testcase-% : test-%
 test-%: %.c $(EXTRA_CFILE)
 	$(CC) $(CFLAGS) $+ -o $@
 
+test-interactions-shm: ./interactions-shm/
+	$(MAKE) -C ./interactions-shm/
+
 clean:
 	rm -f test-*
+	$(MAKE) clean -C ./interactions-shm/
 
 .PHONY: clean \
 	test \
